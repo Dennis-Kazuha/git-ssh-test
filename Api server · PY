@@ -1,0 +1,344 @@
+"""
+FastAPI 後端 API 伺服器
+提供數據給前端使用
+"""
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from typing import List, Dict, Optional
+from datetime import datetime, timedelta, timezone
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import json
+from pathlib import Path
+
+# 建立 FastAPI 應用
+app = FastAPI(title="Crypto Monitor API", version="1.0.0")
+
+# 設定 CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 資料庫配置
+DB_CONFIG = {
+    "host": "localhost",
+    "port": 5432,
+    "database": "crypto_metrics",
+    "user": "postgres",
+    "password": "your_password"
+}
+
+# 靜態檔案（前端）
+BASE_DIR = Path(__file__).resolve().parent.parent
+FRONTEND_DIR = BASE_DIR / "frontend"
+app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
+# ==================== 資料庫連線 ====================
+def get_db_connection():
+    """取得資料庫連線"""
+    return psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor)
+
+# ==================== API 端點 ====================
+
+@app.get("/")
+async def root():
+    """根路徑"""
+    return {"message": "Crypto Monitor API", "status": "running"}
+
+@app.get("/api/funding-rate-stats")
+async def get_funding_rate_stats(
+    days: int = 14,
+    exchange: Optional[str] = None,
+    symbol: Optional[str] = None
+):
+    """
+    取得 Funding Rate 統計數據
+    
+    Args:
+        days: 天數（7 或 14）
+        exchange: 交易所篩選（可選）
+        symbol: 交易對篩選（可選）
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        period = f"{days}d"
+        query = """
+            SELECT * FROM funding_rate_stats 
+            WHERE period = %s
+        """
+        params = [period]
+        
+        if exchange:
+            query += " AND exchange = %s"
+            params.append(exchange)
+        
+        if symbol:
+            query += " AND symbol = %s"
+            params.append(symbol)
+        
+        query += " ORDER BY date DESC, exchange, symbol"
+        
+        cursor.execute(query, params)
+        results = cursor.fetchall()
+        
+        cursor.close()
+        conn.close()
+        
+        return [dict(row) for row in results]
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/spread-stats")
+async def get_spread_stats(
+    days: int = 14,
+    exchange: Optional[str] = None,
+    symbol: Optional[str] = None
+):
+    """
+    取得 Order Book Spread 統計數據
+    
+    Args:
+        days: 天數（7 或 14）
+        exchange: 交易所篩選（可選）
+        symbol: 交易對篩選（可選）
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        period = f"{days}d"
+        query = """
+            SELECT * FROM orderbook_spread_stats 
+            WHERE period = %s
+        """
+        params = [period]
+        
+        if exchange:
+            query += " AND exchange = %s"
+            params.append(exchange)
+        
+        if symbol:
+            query += " AND symbol = %s"
+            params.append(symbol)
+        
+        query += " ORDER BY date DESC, exchange, symbol"
+        
+        cursor.execute(query, params)
+        results = cursor.fetchall()
+        
+        cursor.close()
+        conn.close()
+        
+        return [dict(row) for row in results]
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/options-stats")
+async def get_options_stats(
+    days: int = 7,
+    symbol: Optional[str] = None
+):
+    """
+    取得 Options Greeks 統計數據
+    
+    Args:
+        days: 天數（7 或 14）
+        symbol: 交易對篩選（可選）
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        period = f"{days}d"
+        query = """
+            SELECT * FROM options_greeks_stats 
+            WHERE period = %s
+        """
+        params = [period]
+        
+        if symbol:
+            query += " AND symbol = %s"
+            params.append(symbol)
+        
+        query += " ORDER BY date DESC, symbol"
+        
+        cursor.execute(query, params)
+        results = cursor.fetchall()
+        
+        cursor.close()
+        conn.close()
+        
+        return [dict(row) for row in results]
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/quick-metrics")
+async def get_quick_metrics():
+    """
+    取得快速指標（用於儀表板頂部的卡片）
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # BTC Funding Rate (7天平均)
+        cursor.execute("""
+            SELECT AVG(avg_fr) as btc_fr
+            FROM funding_rate_stats
+            WHERE symbol = 'BTC/USDT' AND period = '7d'
+        """)
+        btc_fr_row = cursor.fetchone()
+        btc_fr = float(btc_fr_row['btc_fr']) if btc_fr_row and btc_fr_row['btc_fr'] else 0.0
+        
+        # BTC Spread (最新平均)
+        cursor.execute("""
+            SELECT AVG(avg_spread) as btc_spread
+            FROM orderbook_spread_stats
+            WHERE symbol = 'BTC/USDT' AND period = '7d'
+            ORDER BY date DESC
+            LIMIT 1
+        """)
+        btc_spread_row = cursor.fetchone()
+        btc_spread = float(btc_spread_row['btc_spread']) if btc_spread_row and btc_spread_row['btc_spread'] else 0.0
+        
+        # Options IV (最新平均)
+        cursor.execute("""
+            SELECT AVG(avg_iv) as options_iv
+            FROM options_greeks_stats
+            WHERE period = '7d'
+            ORDER BY date DESC
+            LIMIT 1
+        """)
+        options_iv_row = cursor.fetchone()
+        options_iv = float(options_iv_row['options_iv']) if options_iv_row and options_iv_row['options_iv'] else 0.0
+        
+        # Options Delta (最新平均)
+        cursor.execute("""
+            SELECT AVG(avg_delta) as options_delta
+            FROM options_greeks_stats
+            WHERE period = '7d'
+            ORDER BY date DESC
+            LIMIT 1
+        """)
+        options_delta_row = cursor.fetchone()
+        options_delta = float(options_delta_row['options_delta']) if options_delta_row and options_delta_row['options_delta'] else 0.0
+        
+        # 總記錄數（從今天的 options 表）
+        today_str = datetime.now().strftime('%Y%m%d')
+        table_name = f"options_greeks_{today_str}"
+        
+        try:
+            cursor.execute(f"SELECT COUNT(*) as count FROM {table_name}")
+            count_row = cursor.fetchone()
+            total_records = count_row['count'] if count_row else 0
+        except:
+            total_records = 0
+        
+        cursor.close()
+        conn.close()
+        
+        return {
+            "btc_fr": btc_fr,
+            "btc_spread": btc_spread,
+            "options_iv": options_iv,
+            "options_delta": options_delta,
+            "total_records": total_records,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/options-realtime")
+async def get_options_realtime(
+    symbol: Optional[str] = None,
+    limit: int = 100
+):
+    """
+    取得 Options Greeks 即時數據（從今天的表）
+    
+    Args:
+        symbol: 交易對篩選（可選）
+        limit: 限制筆數
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        today_str = datetime.now().strftime('%Y%m%d')
+        table_name = f"options_greeks_{today_str}"
+        
+        query = f"""
+            SELECT * FROM {table_name}
+        """
+        params = []
+        
+        if symbol:
+            query += " WHERE symbol = %s"
+            params.append(symbol)
+        
+        query += f" ORDER BY ts_ms DESC LIMIT %s"
+        params.append(limit)
+        
+        cursor.execute(query, params)
+        results = cursor.fetchall()
+        
+        cursor.close()
+        conn.close()
+        
+        return [dict(row) for row in results]
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/health")
+async def health_check():
+    """健康檢查"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        cursor.close()
+        conn.close()
+        
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "database": "disconnected",
+            "error": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+# ==================== 啟動伺服器 ====================
+if __name__ == "__main__":
+    import uvicorn
+    
+    print("=" * 60)
+    print("🚀 啟動 Crypto Monitor API 伺服器")
+    print("=" * 60)
+    print("📍 API 文檔: http://localhost:8000/docs")
+    print("📍 前端介面: http://localhost:8000/static/index.html")
+    print("=" * 60)
+    
+    uvicorn.run(
+        "api_server:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )
