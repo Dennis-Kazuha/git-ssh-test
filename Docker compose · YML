@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 資料庫
+  postgres:
+    image: postgres:15-alpine
+    container_name: crypto_postgres
+    environment:
+      POSTGRES_DB: crypto_metrics
+      POSTGRES_USER: crypto_user
+      POSTGRES_PASSWORD: crypto_password_2024
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crypto_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Grafana 視覺化
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: crypto_grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: grafana-clock-panel
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/dashboard.json:/etc/grafana/provisioning/dashboards/dashboard.json
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  # 數據收集器
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile.collector
+    container_name: crypto_collector
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: crypto_metrics
+      DB_USER: crypto_user
+      DB_PASSWORD: crypto_password_2024
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # API 伺服器
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: crypto_api
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: crypto_metrics
+      DB_USER: crypto_user
+      DB_PASSWORD: crypto_password_2024
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./frontend:/app/frontend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  grafana_data:
+
+networks:
+  default:
+    name: crypto_monitor_network
