@@ -1,0 +1,17 @@
+# Python 套件需求
+
+# 加密貨幣交易所 API
+ccxt>=4.0.0
+
+# 資料庫
+psycopg2-binary>=2.9.0
+
+# Web 框架
+fastapi>=0.104.0
+uvicorn>=0.24.0
+
+# 可選套件（進階功能）
+# pandas>=2.0.0          # 數據分析
+# numpy>=1.24.0          # 數值計算
+# python-dotenv>=1.0.0   # 環境變數管理
+# redis>=5.0.0           # 快取（如果需要）
