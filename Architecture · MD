@@ -1,0 +1,346 @@
+# 🏗️ 系統架構說明
+
+## 📐 整體架構圖
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        數據來源層                                  │
+├─────────────────────────────────────────────────────────────────┤
+│  Binance API  │  MEXC API  │  Deribit API (Options)              │
+│  - BTC/USDT   │  - BTC/USDT│  - BTC-30JAN26-90000-C              │
+│  - ETH/USDT   │  - ETH/USDT│  - BTC-30JAN26-90000-P              │
+└────────┬──────────────┬────────────────┬─────────────────────────┘
+         │              │                │
+         │              │                │
+         ▼              ▼                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                       數據收集層                                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌──────────────────────┐      ┌──────────────────────┐        │
+│  │  FR & OB Collector   │      │  Options Collector   │        │
+│  │  - 間隔: 5 秒         │      │  - 間隔: 100ms       │        │
+│  │  - 輸出: Log 檔案     │      │  - 輸出: 資料庫      │        │
+│  └──────────┬───────────┘      └──────────┬───────────┘        │
+│             │                             │                    │
+│             ▼                             ▼                    │
+│   fr_ob_metrics.log        options_greeks_YYYYMMDD             │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+         │                                  │
+         │                                  │
+         ▼                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                       數據處理層                                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌──────────────────────────────────────────────────┐          │
+│  │           Log 分析腳本 (analyze_logs.py)           │          │
+│  │  - 讀取 Log 檔案和資料庫數據                        │          │
+│  │  - 計算 7天/14天 統計                              │          │
+│  │  - 生成最大/最小/平均值                            │          │
+│  └─────────────────────┬────────────────────────────┘          │
+│                        │                                        │
+│                        ▼                                        │
+│              統計表 (stats tables)                              │
+│              - funding_rate_stats                              │
+│              - orderbook_spread_stats                          │
+│              - options_greeks_stats                            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+         │
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                       資料儲存層                                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│                PostgreSQL 資料庫                                 │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────┐           │
+│  │  時間分片表 (Time-Partitioned Tables)             │           │
+│  │  - options_greeks_20241212                      │           │
+│  │  - options_greeks_20241213                      │           │
+│  │  - options_greeks_20241214                      │           │
+│  │  ...                                            │           │
+│  └─────────────────────────────────────────────────┘           │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────┐           │
+│  │  統計表 (Stats Tables)                           │           │
+│  │  - funding_rate_stats (7d/14d)                  │           │
+│  │  - orderbook_spread_stats (7d/14d)              │           │
+│  │  - options_greeks_stats (7d/14d)                │           │
+│  └─────────────────────────────────────────────────┘           │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+         │                             │
+         │                             │
+         ▼                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                       展示層                                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌────────────────────┐            ┌────────────────────┐      │
+│  │    前端網站          │            │     Grafana         │      │
+│  │  - Bootstrap 5     │            │  - 樹狀圖           │      │
+│  │  - Chart.js        │            │  - 線圖組合          │      │
+│  │  - RWD 設計         │            │  - 即時更新          │      │
+│  │                    │            │                    │      │
+│  │  FastAPI 後端       │            │  PostgreSQL         │      │
+│  │  - RESTful API     │◄───────────┤  Data Source        │      │
+│  │  - JSON 回應        │            │                    │      │
+│  └────────────────────┘            └────────────────────┘      │
+│                                                                 │
+│  訪問方式:                                                        │
+│  - 前端: http://localhost:8000/static/index.html                │
+│  - API: http://localhost:8000/docs                             │
+│  - Grafana: http://localhost:3000                              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## 🔄 數據流程詳解
+
+### 1. 收集階段 (Collection Phase)
+
+#### Options Greeks (毫秒級)
+```
+Deribit API → main_collector.py (100ms interval)
+                      ↓
+            collect_options_greeks()
+                      ↓
+            DatabaseManager.insert_options_greeks()
+                      ↓
+         options_greeks_YYYYMMDD 表 (PostgreSQL)
+                      ↓
+            (備份) options_metrics.log
+```
+
+#### Funding Rate & Order Book (秒級)
+```
+Binance/MEXC API → main_collector.py (5s interval)
+                      ↓
+         ┌────────────┴────────────┐
+         ▼                         ▼
+  collect_funding_rate()   collect_orderbook_spread()
+         │                         │
+         └────────────┬────────────┘
+                      ▼
+              JSON.dumps() → Log
+                      ↓
+           fr_ob_metrics.log
+```
+
+### 2. 分析階段 (Analysis Phase)
+
+```
+定時任務 (每天 1:00)
+         ↓
+  analyze_logs.py
+         │
+         ├─→ parse_log_file()
+         │   ├─ 讀取 fr_ob_metrics.log
+         │   ├─ 過濾 7天/14天 數據
+         │   └─ 按 exchange/symbol 分組
+         │
+         ├─→ analyze_options_from_db()
+         │   ├─ 查詢 options_greeks_* 表
+         │   ├─ 跨表 UNION 查詢
+         │   └─ 計算統計值
+         │
+         └─→ 計算統計並寫入
+             ├─ Max, Min, Avg, Std
+             ├─ funding_rate_stats
+             ├─ orderbook_spread_stats
+             └─ options_greeks_stats
+```
+
+### 3. 展示階段 (Presentation Phase)
+
+#### 前端網站流程
+```
+用戶訪問 http://localhost:8000/static/index.html
+         ↓
+  dashboard.js 初始化
+         ↓
+    ┌────┴────┐
+    ▼         ▼
+API 請求    圖表初始化
+    │         │
+    ├─→ /api/funding-rate-stats?days=14
+    ├─→ /api/spread-stats?days=14
+    ├─→ /api/options-stats?days=7
+    ├─→ /api/quick-metrics
+    │         │
+    └────┬────┘
+         ↓
+   FastAPI 處理
+         ↓
+   PostgreSQL 查詢
+         ↓
+   JSON 回應
+         ↓
+   Chart.js 渲染
+         ↓
+   用戶看到視覺化結果
+```
+
+#### Grafana 流程
+```
+用戶訪問 http://localhost:3000
+         ↓
+   Grafana Dashboard
+         ↓
+   SQL 查詢 (PostgreSQL Data Source)
+         │
+         ├─→ SELECT FROM funding_rate_stats
+         ├─→ SELECT FROM orderbook_spread_stats
+         └─→ SELECT FROM options_greeks_stats
+         ↓
+   視覺化渲染
+         ├─ 線圖 (Time Series)
+         ├─ 樹狀圖 (Bar Gauge)
+         ├─ 表格 (Table)
+         └─ 儀表板 (Gauge)
+```
+
+## 🗄️ 資料庫設計
+
+### 時間分片策略
+
+#### Options Greeks 表 (按日期分片)
+```sql
+-- 每天自動建立新表
+CREATE TABLE options_greeks_20241212 (
+    ts_ms BIGINT PRIMARY KEY,
+    ts TIMESTAMPTZ,
+    exchange VARCHAR(50),
+    symbol VARCHAR(100),
+    price NUMERIC(20,8),
+    iv NUMERIC(10,6),
+    delta NUMERIC(10,6),
+    gamma NUMERIC(10,6),
+    vega NUMERIC(10,6),
+    theta NUMERIC(10,6),
+    rho NUMERIC(10,6),
+    ...
+);
+```
+
+**優點:**
+- ✅ 查詢效能高 (只掃描需要的日期表)
+- ✅ 維護方便 (刪除舊表即可清理數據)
+- ✅ 支援大數據量 (每表獨立索引)
+
+**自動管理:**
+- 每天凌晨 2 點建立未來 7 天的表
+- 每週日凌晨 3 點刪除 30 天前的表
+
+### 統計表設計
+
+```sql
+-- Funding Rate 統計表
+CREATE TABLE funding_rate_stats (
+    date DATE,
+    exchange VARCHAR(50),
+    symbol VARCHAR(100),
+    period VARCHAR(20),  -- '7d' or '14d'
+    max_fr NUMERIC(10,8),
+    min_fr NUMERIC(10,8),
+    avg_fr NUMERIC(10,8),
+    std_fr NUMERIC(10,8),
+    count INTEGER,
+    PRIMARY KEY (date, exchange, symbol, period)
+);
+```
+
+**特點:**
+- ✅ 預先計算好的統計值
+- ✅ 快速查詢 (無需實時計算)
+- ✅ 支援時間範圍比較 (7d vs 14d)
+
+## 🔧 技術棧
+
+### 後端
+| 技術 | 用途 | 版本 |
+|------|------|------|
+| Python | 主要語言 | 3.8+ |
+| ccxt | 交易所 API | 4.0+ |
+| PostgreSQL | 資料庫 | 12+ |
+| psycopg2 | 資料庫驅動 | 2.9+ |
+| FastAPI | Web 框架 | 0.104+ |
+| uvicorn | ASGI 伺服器 | 0.24+ |
+
+### 前端
+| 技術 | 用途 | 版本 |
+|------|------|------|
+| Bootstrap | UI 框架 | 5.3 |
+| Chart.js | 圖表庫 | 4.4 |
+| JavaScript | 前端邏輯 | ES6+ |
+
+### 視覺化
+| 技術 | 用途 | 版本 |
+|------|------|------|
+| Grafana | 資料視覺化 | 10.0 |
+
+## ⚡ 效能優化
+
+### 1. 數據收集優化
+- ✅ Options 使用多執行緒收集
+- ✅ API 請求加入 rate limit
+- ✅ 批次寫入資料庫 (減少 I/O)
+
+### 2. 資料庫優化
+- ✅ 時間分片 (提升查詢速度)
+- ✅ 索引優化 (ts, symbol, exchange)
+- ✅ 預先計算統計值 (避免實時計算)
+
+### 3. 前端優化
+- ✅ 延遲載入圖表
+- ✅ 定期更新 (30秒) 而非即時
+- ✅ 使用 CDN 載入靜態資源
+
+## 📈 擴展性
+
+### 水平擴展
+```
+                    Load Balancer
+                          ↓
+        ┌─────────────────┼─────────────────┐
+        ▼                 ▼                 ▼
+    Collector 1      Collector 2      Collector 3
+        │                 │                 │
+        └─────────────────┼─────────────────┘
+                          ↓
+                   PostgreSQL
+                   (可使用 Master-Slave 複製)
+```
+
+### 垂直擴展
+- 增加收集頻率 (Options: 100ms → 50ms)
+- 增加交易所數量
+- 增加交易對數量
+- 增加統計維度
+
+## 🔒 安全考量
+
+1. **資料庫安全**
+   - 使用強密碼
+   - 限制資料庫訪問 IP
+   - 定期備份
+
+2. **API 安全**
+   - 生產環境加入 JWT 認證
+   - Rate Limiting
+   - CORS 白名單
+
+3. **數據安全**
+   - Log 檔案定期輪轉
+   - 敏感資料加密
+   - 定期清理舊數據
+
+---
+
+**文件版本**: 1.0.0
+**最後更新**: 2024-12-12
+**維護者**: Dennis @ IVT PD1
