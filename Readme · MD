@@ -1,0 +1,374 @@
+# 🚀 加密貨幣監控系統
+
+完整的加密貨幣數據收集、分析和視覺化系統
+
+## 📋 系統架構
+
+```
+crypto_monitor/
+├── collectors/          # 數據收集器
+│   └── main_collector.py   # Options(毫秒級) + FR/OB(Log)收集
+├── database/           # 資料庫管理
+│   └── db_init.py          # 資料庫初始化（時間分片）
+├── scripts/            # 工具腳本
+│   └── analyze_logs.py     # Log分析（14天/7天統計）
+├── frontend/           # 前端網站
+│   ├── index.html          # Bootstrap響應式介面
+│   ├── dashboard.js        # 前端邏輯
+│   └── api_server.py       # FastAPI後端
+├── grafana/            # Grafana配置
+│   └── dashboard.json      # 樹狀圖+線圖組合
+└── logs/               # Log檔案目錄
+    ├── fr_ob_metrics.log    # FR & OB Log
+    ├── options_metrics.log   # Options備份Log
+    └── system.log           # 系統Log
+```
+
+## 🎯 功能特色
+
+### 1️⃣ **數據收集**
+- ✅ **Options Greeks**: 毫秒級 (100ms) 收集，直接寫入資料庫
+- ✅ **Funding Rate**: 每 5 秒收集，記錄到 Log
+- ✅ **Order Book Spread**: 每 5 秒收集，記錄到 Log
+
+### 2️⃣ **資料庫設計**
+- ✅ **時間分片**: Options 數據按日期分表 (`options_greeks_YYYYMMDD`)
+- ✅ **統計表**: 自動計算 7天/14天 最大最小值
+- ✅ **PostgreSQL**: 高效能時序數據儲存
+
+### 3️⃣ **前端介面**
+- ✅ **Bootstrap 5**: 現代化響應式設計
+- ✅ **RWD**: 完整的手機/平板/桌面支援
+- ✅ **Chart.js**: 互動式圖表
+- ✅ **即時更新**: 每 30 秒自動刷新
+
+### 4️⃣ **Grafana 視覺化**
+- ✅ **樹狀圖**: Options Greeks 分層展示
+- ✅ **線圖**: FR/OB/IV 趨勢分析
+- ✅ **組合圖表**: 多維度數據對比
+
+## 🔧 環境需求
+
+### 必要軟體
+```bash
+# Python 3.8+
+python --version
+
+# PostgreSQL 12+
+psql --version
+
+# Node.js (可選，用於前端開發)
+node --version
+```
+
+### Python 套件
+```bash
+pip install ccxt psycopg2-binary fastapi uvicorn --break-system-packages
+```
+
+## 📦 安裝步驟
+
+### Step 1: 安裝 PostgreSQL
+```bash
+# Ubuntu/Debian
+sudo apt update
+sudo apt install postgresql postgresql-contrib
+
+# macOS
+brew install postgresql
+
+# 啟動服務
+sudo systemctl start postgresql
+```
+
+### Step 2: 建立資料庫
+```bash
+# 切換到 postgres 用戶
+sudo -u postgres psql
+
+# 建立資料庫和用戶
+CREATE DATABASE crypto_metrics;
+CREATE USER crypto_user WITH PASSWORD 'your_secure_password';
+GRANT ALL PRIVILEGES ON DATABASE crypto_metrics TO crypto_user;
+\q
+```
+
+### Step 3: 更新配置
+編輯所有 Python 檔案中的 `DB_CONFIG`:
+```python
+DB_CONFIG = {
+    "host": "localhost",
+    "port": 5432,
+    "database": "crypto_metrics",
+    "user": "crypto_user",      # 改成你的用戶名
+    "password": "your_password"  # 改成你的密碼
+}
+```
+
+### Step 4: 初始化資料庫
+```bash
+cd /home/claude/crypto_monitor
+python database/db_init.py init
+```
+
+## 🚀 啟動系統
+
+### 1. 啟動數據收集器
+```bash
+# 在第一個終端機
+python collectors/main_collector.py
+```
+
+輸出範例:
+```
+============================================================
+🚀 加密貨幣數據收集系統啟動
+============================================================
+📁 Log 目錄: /home/claude/crypto_monitor/logs
+📊 Options 間隔: 100 ms
+📊 FR/OB 間隔: 5 秒
+============================================================
+✅ 所有收集器已啟動
+按 Ctrl+C 停止...
+```
+
+### 2. 執行 Log 分析（定期執行）
+```bash
+# 在第二個終端機，建議每天執行一次
+python scripts/analyze_logs.py
+```
+
+這會計算並儲存:
+- ✅ 7天和14天的 FR 最大最小值
+- ✅ 7天和14天的 Spread 最大最小值
+- ✅ 7天和14天的 Options Greeks 統計
+
+### 3. 啟動前端 API 伺服器
+```bash
+# 在第三個終端機
+python frontend/api_server.py
+```
+
+前端網站: http://localhost:8000/static/index.html
+API 文檔: http://localhost:8000/docs
+
+### 4. 設定 Grafana（可選但推薦）
+
+#### 安裝 Grafana
+```bash
+# Ubuntu/Debian
+sudo apt-get install -y adduser libfontconfig1
+wget https://dl.grafana.com/oss/release/grafana_10.0.0_amd64.deb
+sudo dpkg -i grafana_10.0.0_amd64.deb
+sudo systemctl start grafana-server
+
+# macOS
+brew install grafana
+brew services start grafana
+```
+
+#### 配置 Grafana
+1. 開啟 Grafana: http://localhost:3000
+2. 預設帳密: `admin` / `admin`
+3. 新增 Data Source:
+   - Type: PostgreSQL
+   - Host: `localhost:5432`
+   - Database: `crypto_metrics`
+   - User: `crypto_user`
+   - Password: `your_password`
+   - SSL Mode: `disable`
+
+4. 匯入 Dashboard:
+   - 點選 "+" → "Import"
+   - 上傳 `grafana/dashboard.json`
+   - 選擇剛建立的 PostgreSQL data source
+   - 點選 "Import"
+
+## 📊 使用指南
+
+### 前端功能
+
+#### 1. 儀表板首頁
+- 快速統計卡片: BTC FR, BTC Spread, Options IV, Delta
+- 系統狀態: 運行狀態、最後更新時間、總記錄數
+
+#### 2. Funding Rate 區塊
+- **趨勢圖**: 14天 FR 趨勢
+- **統計表**: 7天 vs 14天 最大最小值對比
+
+#### 3. Order Book Spread 區塊
+- **趨勢圖**: 14天 Spread 趨勢
+- **統計表**: 平均/最大/最小 Spread
+
+#### 4. Options Greeks 區塊
+- **IV 趨勢圖**: 隱含波動率變化
+- **Greeks 雷達圖**: Delta/Gamma/Vega/Theta/Rho 分布
+
+#### 5. Grafana 整合
+- 點選按鈕直接開啟 Grafana 完整視覺化
+
+### Grafana 功能
+
+#### 樹狀圖（Bar Gauge）
+顯示每個 Options 合約的 Greeks 值:
+- Delta: 價格敏感度
+- Gamma: Delta 變化率
+- Vega: 波動率敏感度
+- Theta: 時間衰減
+
+#### 線圖組合
+- FR 趨勢: 多交易所對比
+- Spread 趨勢: 流動性分析
+- IV 趨勢: 市場情緒指標
+
+## 🛠️ 維護任務
+
+### 每日維護
+```bash
+# 1. 執行 Log 分析（建議在凌晨執行）
+0 1 * * * python /path/to/crypto_monitor/scripts/analyze_logs.py
+
+# 2. 建立未來分片表
+0 2 * * * python /path/to/crypto_monitor/database/db_init.py prepare 7
+
+# 3. 清理 30 天前的舊表
+0 3 * * 0 python /path/to/crypto_monitor/database/db_init.py cleanup 30
+```
+
+### 監控檢查
+```bash
+# 檢查收集器狀態
+ps aux | grep main_collector.py
+
+# 檢查 Log 檔案大小
+ls -lh logs/
+
+# 檢查資料庫連線
+python -c "import psycopg2; conn = psycopg2.connect(host='localhost', database='crypto_metrics', user='crypto_user', password='your_password'); print('✅ 連線成功')"
+```
+
+## 📈 數據流程
+
+```
+1. 收集階段:
+   Options (100ms) → PostgreSQL (options_greeks_YYYYMMDD)
+   FR/OB (5s) → Log檔案 (fr_ob_metrics.log)
+
+2. 分析階段:
+   Log檔案 → analyze_logs.py → 統計表
+   - funding_rate_stats (7d/14d)
+   - orderbook_spread_stats (7d/14d)
+   - options_greeks_stats (7d/14d)
+
+3. 展示階段:
+   統計表 → FastAPI → 前端/Grafana
+```
+
+## 🔍 故障排除
+
+### 問題 1: 資料庫連線失敗
+```bash
+# 檢查 PostgreSQL 是否運行
+sudo systemctl status postgresql
+
+# 測試連線
+psql -h localhost -U crypto_user -d crypto_metrics
+```
+
+### 問題 2: Options 收集失敗
+```bash
+# 檢查 ccxt 版本
+pip show ccxt
+
+# 測試 Deribit 連線
+python -c "import ccxt; ex = ccxt.deribit(); print(ex.fetch_ticker('BTC-30JAN26-90000-C'))"
+```
+
+### 問題 3: 前端無法顯示數據
+```bash
+# 檢查 API 健康狀態
+curl http://localhost:8000/api/health
+
+# 檢查瀏覽器 Console 是否有錯誤
+```
+
+### 問題 4: Grafana 無數據
+```bash
+# 測試 PostgreSQL Data Source
+# 在 Grafana → Configuration → Data Sources → 點選 Test
+
+# 檢查表是否存在
+psql -h localhost -U crypto_user -d crypto_metrics -c "\dt"
+```
+
+## 📝 API 端點
+
+### 基本端點
+- `GET /` - API 狀態
+- `GET /api/health` - 健康檢查
+
+### 數據端點
+- `GET /api/funding-rate-stats?days=14` - FR 統計
+- `GET /api/spread-stats?days=14` - Spread 統計
+- `GET /api/options-stats?days=7` - Options 統計
+- `GET /api/quick-metrics` - 快速指標
+- `GET /api/options-realtime?limit=100` - 即時 Options
+
+### 查詢參數
+```
+days: 天數 (7 或 14)
+exchange: 交易所篩選 (binance, mexc)
+symbol: 交易對篩選 (BTC/USDT)
+limit: 限制筆數
+```
+
+## 🎨 自訂修改
+
+### 修改收集間隔
+編輯 `collectors/main_collector.py`:
+```python
+FR_OB_INTERVAL = 5          # FR/OB 間隔（秒）
+OPTIONS_INTERVAL_MS = 100   # Options 間隔（毫秒）
+```
+
+### 新增交易所
+```python
+EXCHANGES = ["mexc", "binance", "okx"]  # 新增 okx
+```
+
+### 新增交易對
+```python
+SPOT_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+```
+
+### 新增 Options 合約
+```python
+OPTIONS_SYMBOLS = [
+    "BTC-30JAN26-90000-C",
+    "BTC-30JAN26-90000-P",
+    "ETH-30JAN26-3000-C",  # 新增
+]
+```
+
+## 🔐 安全建議
+
+1. **資料庫密碼**: 使用強密碼並定期更換
+2. **API 認證**: 在生產環境加入 JWT 認證
+3. **防火牆**: 限制資料庫和 API 的訪問
+4. **備份**: 定期備份資料庫
+
+## 📞 技術支援
+
+如有問題,請聯絡:
+- **開發團隊**: IVT PD1 Department
+- **技術負責人**: Dennis
+- **Email**: [your-email]
+
+## 📜 授權
+
+Internal Use Only - IVT Company
+
+---
+
+**版本**: 1.0.0
+**最後更新**: 2024-12-12
