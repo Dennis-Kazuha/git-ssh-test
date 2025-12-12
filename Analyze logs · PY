@@ -1,0 +1,393 @@
+"""
+Log 數據分析腳本
+- 讀取 FR 和 OB 的 Log 檔案
+- 計算 14 天和 7 天的統計數據（最大、最小、平均）
+- 寫入資料庫供 Grafana 查詢
+"""
+import json
+import psycopg2
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from collections import defaultdict
+import statistics
+
+DB_CONFIG = {
+    "host": "localhost",
+    "port": 5432,
+    "database": "crypto_metrics",
+    "user": "postgres",
+    "password": "your_password"
+}
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+LOG_DIR = BASE_DIR / "logs"
+
+def parse_log_file(log_file: Path, days: int):
+    """
+    解析 Log 檔案並取得指定天數的數據
+    
+    Args:
+        log_file: Log 檔案路徑
+        days: 要分析的天數（7 或 14）
+    
+    Returns:
+        dict: {(exchange, symbol, metric): [values]}
+    """
+    cutoff_time = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff_ts_ms = int(cutoff_time.timestamp() * 1000)
+    
+    data = defaultdict(list)
+    
+    print(f"📖 讀取 Log: {log_file.name}...")
+    
+    try:
+        with open(log_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                try:
+                    record = json.loads(line)
+                    ts_ms = record.get('ts_ms', 0)
+                    
+                    # 只取指定天數內的數據
+                    if ts_ms < cutoff_ts_ms:
+                        continue
+                    
+                    exchange = record.get('exchange')
+                    symbol = record.get('symbol')
+                    metric = record.get('metric')
+                    tag = record.get('tag', metric)
+                    
+                    key = (exchange, symbol, metric, tag)
+                    data[key].append(record)
+                
+                except json.JSONDecodeError:
+                    continue
+    
+    except FileNotFoundError:
+        print(f"⚠️  Log 檔案不存在: {log_file}")
+        return {}
+    
+    print(f"✅ 讀取完成: {len(data)} 個數據組")
+    return data
+
+def calculate_fr_stats(records):
+    """計算 Funding Rate 統計"""
+    if not records:
+        return None
+    
+    fr_values = [r['funding_rate'] for r in records if 'funding_rate' in r]
+    
+    if not fr_values:
+        return None
+    
+    return {
+        'max_fr': max(fr_values),
+        'min_fr': min(fr_values),
+        'avg_fr': statistics.mean(fr_values),
+        'std_fr': statistics.stdev(fr_values) if len(fr_values) > 1 else 0,
+        'count': len(fr_values)
+    }
+
+def calculate_ob_stats(records):
+    """計算 Order Book Spread 統計"""
+    if not records:
+        return None
+    
+    spread_values = [r['spread'] for r in records if 'spread' in r]
+    spread_pct_values = [r['spread_pct'] for r in records if 'spread_pct' in r]
+    
+    if not spread_values:
+        return None
+    
+    return {
+        'max_spread': max(spread_values),
+        'min_spread': min(spread_values),
+        'avg_spread': statistics.mean(spread_values),
+        'max_spread_pct': max(spread_pct_values) if spread_pct_values else None,
+        'min_spread_pct': min(spread_pct_values) if spread_pct_values else None,
+        'avg_spread_pct': statistics.mean(spread_pct_values) if spread_pct_values else None,
+        'count': len(spread_values)
+    }
+
+def save_fr_stats_to_db(stats, exchange, symbol, period, date):
+    """儲存 FR 統計到資料庫"""
+    conn = psycopg2.connect(**DB_CONFIG)
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        INSERT INTO funding_rate_stats 
+        (date, exchange, symbol, period, max_fr, min_fr, avg_fr, std_fr, count)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (date, exchange, symbol, period) 
+        DO UPDATE SET
+            max_fr = EXCLUDED.max_fr,
+            min_fr = EXCLUDED.min_fr,
+            avg_fr = EXCLUDED.avg_fr,
+            std_fr = EXCLUDED.std_fr,
+            count = EXCLUDED.count,
+            updated_at = NOW()
+    """, (
+        date,
+        exchange,
+        symbol,
+        period,
+        stats['max_fr'],
+        stats['min_fr'],
+        stats['avg_fr'],
+        stats['std_fr'],
+        stats['count']
+    ))
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def save_ob_stats_to_db(stats, exchange, symbol, period, date):
+    """儲存 OB 統計到資料庫"""
+    conn = psycopg2.connect(**DB_CONFIG)
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        INSERT INTO orderbook_spread_stats 
+        (date, exchange, symbol, period, max_spread, min_spread, avg_spread,
+         max_spread_pct, min_spread_pct, avg_spread_pct, count)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (date, exchange, symbol, period) 
+        DO UPDATE SET
+            max_spread = EXCLUDED.max_spread,
+            min_spread = EXCLUDED.min_spread,
+            avg_spread = EXCLUDED.avg_spread,
+            max_spread_pct = EXCLUDED.max_spread_pct,
+            min_spread_pct = EXCLUDED.min_spread_pct,
+            avg_spread_pct = EXCLUDED.avg_spread_pct,
+            count = EXCLUDED.count,
+            updated_at = NOW()
+    """, (
+        date,
+        exchange,
+        symbol,
+        period,
+        stats['max_spread'],
+        stats['min_spread'],
+        stats['avg_spread'],
+        stats['max_spread_pct'],
+        stats['min_spread_pct'],
+        stats['avg_spread_pct'],
+        stats['count']
+    ))
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def analyze_logs(days, log_file):
+    """分析 Log 並儲存統計"""
+    print(f"\n{'='*60}")
+    print(f"📊 分析 {days} 天的數據: {log_file.name}")
+    print('='*60)
+    
+    period = f"{days}d"
+    today = datetime.now().date()
+    
+    # 解析 Log
+    data = parse_log_file(log_file, days)
+    
+    if not data:
+        print("⚠️  沒有數據可分析")
+        return
+    
+    # 統計每個數據組
+    for (exchange, symbol, metric, tag), records in data.items():
+        print(f"\n📈 {exchange} | {symbol} | {tag}")
+        print(f"   記錄數: {len(records)}")
+        
+        if metric == "funding_rate":
+            stats = calculate_fr_stats(records)
+            if stats:
+                print(f"   FR 最大: {stats['max_fr']:.6f}%")
+                print(f"   FR 最小: {stats['min_fr']:.6f}%")
+                print(f"   FR 平均: {stats['avg_fr']:.6f}%")
+                save_fr_stats_to_db(stats, exchange, symbol, period, today)
+        
+        elif metric == "orderbook_spread":
+            stats = calculate_ob_stats(records)
+            if stats:
+                print(f"   Spread 最大: {stats['max_spread']:.8f}")
+                print(f"   Spread 最小: {stats['min_spread']:.8f}")
+                print(f"   Spread 平均: {stats['avg_spread']:.8f}")
+                if stats['avg_spread_pct']:
+                    print(f"   Spread% 平均: {stats['avg_spread_pct']:.4f}%")
+                save_ob_stats_to_db(stats, exchange, symbol, period, today)
+    
+    print(f"\n✅ {days} 天統計完成")
+
+def analyze_options_from_db(days):
+    """從資料庫分析 Options Greeks 統計"""
+    print(f"\n{'='*60}")
+    print(f"📊 分析 Options Greeks {days} 天的數據")
+    print('='*60)
+    
+    conn = psycopg2.connect(**DB_CONFIG)
+    cursor = conn.cursor()
+    
+    # 取得最近 N 天的日期
+    end_date = datetime.now().date()
+    start_date = end_date - timedelta(days=days)
+    
+    # 找出這段期間的所有表
+    tables = []
+    current_date = start_date
+    while current_date <= end_date:
+        date_str = current_date.strftime('%Y%m%d')
+        table_name = f"options_greeks_{date_str}"
+        
+        # 檢查表是否存在
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM pg_tables 
+                WHERE schemaname = 'public' 
+                AND tablename = %s
+            )
+        """, (table_name,))
+        
+        if cursor.fetchone()[0]:
+            tables.append(table_name)
+        
+        current_date += timedelta(days=1)
+    
+    if not tables:
+        print("⚠️  沒有找到 Options Greeks 表")
+        cursor.close()
+        conn.close()
+        return
+    
+    print(f"📋 找到 {len(tables)} 個表")
+    
+    # 對每個 symbol 計算統計
+    for table in tables:
+        cursor.execute(f"""
+            SELECT DISTINCT symbol FROM {table}
+        """)
+        symbols = [row[0] for row in cursor.fetchall()]
+        
+        for symbol in symbols:
+            # 建立 UNION 查詢
+            union_query = " UNION ALL ".join([
+                f"SELECT iv, delta, gamma, vega, theta FROM {t} WHERE symbol = %s"
+                for t in tables
+            ])
+            
+            cursor.execute(union_query, [symbol] * len(tables))
+            rows = cursor.fetchall()
+            
+            if not rows:
+                continue
+            
+            # 計算統計
+            iv_values = [r[0] for r in rows if r[0] is not None]
+            delta_values = [r[1] for r in rows if r[1] is not None]
+            gamma_values = [r[2] for r in rows if r[2] is not None]
+            vega_values = [r[3] for r in rows if r[3] is not None]
+            theta_values = [r[4] for r in rows if r[4] is not None]
+            
+            if not iv_values:
+                continue
+            
+            print(f"\n📈 {symbol}")
+            print(f"   記錄數: {len(rows)}")
+            print(f"   IV 最大: {max(iv_values):.4f}")
+            print(f"   IV 最小: {min(iv_values):.4f}")
+            print(f"   IV 平均: {statistics.mean(iv_values):.4f}")
+            
+            # 儲存統計
+            period = f"{days}d"
+            cursor.execute("""
+                INSERT INTO options_greeks_stats 
+                (date, symbol, period, 
+                 max_iv, min_iv, avg_iv,
+                 max_delta, min_delta, avg_delta,
+                 max_gamma, min_gamma, avg_gamma,
+                 max_vega, min_vega, avg_vega,
+                 max_theta, min_theta, avg_theta,
+                 count)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (date, symbol, period) 
+                DO UPDATE SET
+                    max_iv = EXCLUDED.max_iv,
+                    min_iv = EXCLUDED.min_iv,
+                    avg_iv = EXCLUDED.avg_iv,
+                    max_delta = EXCLUDED.max_delta,
+                    min_delta = EXCLUDED.min_delta,
+                    avg_delta = EXCLUDED.avg_delta,
+                    max_gamma = EXCLUDED.max_gamma,
+                    min_gamma = EXCLUDED.min_gamma,
+                    avg_gamma = EXCLUDED.avg_gamma,
+                    max_vega = EXCLUDED.max_vega,
+                    min_vega = EXCLUDED.min_vega,
+                    avg_vega = EXCLUDED.avg_vega,
+                    max_theta = EXCLUDED.max_theta,
+                    min_theta = EXCLUDED.min_theta,
+                    avg_theta = EXCLUDED.avg_theta,
+                    count = EXCLUDED.count,
+                    updated_at = NOW()
+            """, (
+                end_date,
+                symbol,
+                period,
+                max(iv_values) if iv_values else None,
+                min(iv_values) if iv_values else None,
+                statistics.mean(iv_values) if iv_values else None,
+                max(delta_values) if delta_values else None,
+                min(delta_values) if delta_values else None,
+                statistics.mean(delta_values) if delta_values else None,
+                max(gamma_values) if gamma_values else None,
+                min(gamma_values) if gamma_values else None,
+                statistics.mean(gamma_values) if gamma_values else None,
+                max(vega_values) if vega_values else None,
+                min(vega_values) if vega_values else None,
+                statistics.mean(vega_values) if vega_values else None,
+                max(theta_values) if theta_values else None,
+                min(theta_values) if theta_values else None,
+                statistics.mean(theta_values) if theta_values else None,
+                len(rows)
+            ))
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+    
+    print(f"\n✅ Options Greeks {days} 天統計完成")
+
+def main():
+    """主程式"""
+    print("=" * 60)
+    print("📊 Log 數據分析工具")
+    print("=" * 60)
+    
+    fr_ob_log = LOG_DIR / "fr_ob_metrics.log"
+    
+    # 分析 FR & OB
+    if fr_ob_log.exists():
+        print("\n🔍 分析 Funding Rate & Order Book")
+        analyze_logs(7, fr_ob_log)
+        analyze_logs(14, fr_ob_log)
+    else:
+        print(f"\n⚠️  找不到 Log 檔案: {fr_ob_log}")
+    
+    # 分析 Options Greeks
+    print("\n🔍 分析 Options Greeks")
+    try:
+        analyze_options_from_db(7)
+        analyze_options_from_db(14)
+    except Exception as e:
+        print(f"⚠️  Options 分析失敗: {e}")
+    
+    print("\n" + "=" * 60)
+    print("✅ 所有分析完成")
+    print("=" * 60)
+
+if __name__ == "__main__":
+    main()
