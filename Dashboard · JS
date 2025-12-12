@@ -1,0 +1,433 @@
+// API 端點配置
+const API_BASE_URL = 'http://localhost:8000/api';
+
+// 圖表實例
+let frChart, spreadChart, ivChart, greeksChart;
+
+// 初始化
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('Dashboard initialized');
+    
+    // 初始化圖表
+    initCharts();
+    
+    // 載入數據
+    loadAllData();
+    
+    // 設定自動更新 (每 30 秒)
+    setInterval(loadAllData, 30000);
+    
+    // 更新最後更新時間
+    updateLastUpdateTime();
+});
+
+// 初始化所有圖表
+function initCharts() {
+    // FR 趨勢圖
+    const frCtx = document.getElementById('frChart').getContext('2d');
+    frChart = new Chart(frCtx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [{
+                label: 'Binance BTC/USDT',
+                data: [],
+                borderColor: '#667eea',
+                backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                tension: 0.4
+            }, {
+                label: 'MEXC BTC/USDT',
+                data: [],
+                borderColor: '#764ba2',
+                backgroundColor: 'rgba(118, 75, 162, 0.1)',
+                tension: 0.4
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'top',
+                },
+                title: {
+                    display: false
+                }
+            },
+            scales: {
+                y: {
+                    ticks: {
+                        callback: function(value) {
+                            return (value * 100).toFixed(4) + '%';
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Spread 趨勢圖
+    const spreadCtx = document.getElementById('spreadChart').getContext('2d');
+    spreadChart = new Chart(spreadCtx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [{
+                label: 'Avg Spread',
+                data: [],
+                borderColor: '#f093fb',
+                backgroundColor: 'rgba(240, 147, 251, 0.1)',
+                tension: 0.4
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'top',
+                }
+            }
+        }
+    });
+
+    // IV 趨勢圖
+    const ivCtx = document.getElementById('ivChart').getContext('2d');
+    ivChart = new Chart(ivCtx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [{
+                label: 'Implied Volatility',
+                data: [],
+                borderColor: '#4facfe',
+                backgroundColor: 'rgba(79, 172, 254, 0.1)',
+                tension: 0.4
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'top',
+                },
+                title: {
+                    display: true,
+                    text: 'Implied Volatility (IV) 趨勢'
+                }
+            }
+        }
+    });
+
+    // Greeks 雷達圖
+    const greeksCtx = document.getElementById('greeksChart').getContext('2d');
+    greeksChart = new Chart(greeksCtx, {
+        type: 'radar',
+        data: {
+            labels: ['Delta', 'Gamma', 'Vega', 'Theta', 'Rho'],
+            datasets: [{
+                label: 'Current Greeks',
+                data: [0, 0, 0, 0, 0],
+                borderColor: '#43e97b',
+                backgroundColor: 'rgba(67, 233, 123, 0.2)',
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'top',
+                },
+                title: {
+                    display: true,
+                    text: 'Options Greeks 分布'
+                }
+            },
+            scales: {
+                r: {
+                    beginAtZero: true
+                }
+            }
+        }
+    });
+}
+
+// 載入所有數據
+async function loadAllData() {
+    try {
+        await Promise.all([
+            loadFRStats(),
+            loadSpreadStats(),
+            loadOptionsStats(),
+            loadQuickMetrics()
+        ]);
+        
+        updateLastUpdateTime();
+    } catch (error) {
+        console.error('Error loading data:', error);
+    }
+}
+
+// 載入 FR 統計
+async function loadFRStats() {
+    try {
+        const response = await fetch(`${API_BASE_URL}/funding-rate-stats?days=14`);
+        const data = await response.json();
+        
+        if (data && data.length > 0) {
+            updateFRChart(data);
+            updateFRTable(data);
+        }
+    } catch (error) {
+        console.error('Error loading FR stats:', error);
+        // 使用模擬數據
+        useMockFRData();
+    }
+}
+
+// 載入 Spread 統計
+async function loadSpreadStats() {
+    try {
+        const response = await fetch(`${API_BASE_URL}/spread-stats?days=14`);
+        const data = await response.json();
+        
+        if (data && data.length > 0) {
+            updateSpreadChart(data);
+            updateSpreadTable(data);
+        }
+    } catch (error) {
+        console.error('Error loading Spread stats:', error);
+        useMockSpreadData();
+    }
+}
+
+// 載入 Options 統計
+async function loadOptionsStats() {
+    try {
+        const response = await fetch(`${API_BASE_URL}/options-stats?days=7`);
+        const data = await response.json();
+        
+        if (data && data.length > 0) {
+            updateOptionsCharts(data);
+        }
+    } catch (error) {
+        console.error('Error loading Options stats:', error);
+        useMockOptionsData();
+    }
+}
+
+// 載入快速指標
+async function loadQuickMetrics() {
+    try {
+        const response = await fetch(`${API_BASE_URL}/quick-metrics`);
+        const data = await response.json();
+        
+        if (data) {
+            document.getElementById('btcFR').textContent = 
+                (data.btc_fr * 100).toFixed(4) + '%';
+            document.getElementById('btcSpread').textContent = 
+                '$' + data.btc_spread.toFixed(2);
+            document.getElementById('optionsIV').textContent = 
+                (data.options_iv * 100).toFixed(2) + '%';
+            document.getElementById('optionsDelta').textContent = 
+                data.options_delta.toFixed(4);
+            document.getElementById('totalRecords').textContent = 
+                data.total_records.toLocaleString();
+        }
+    } catch (error) {
+        console.error('Error loading quick metrics:', error);
+        // 使用模擬數據
+        document.getElementById('btcFR').textContent = '0.0465%';
+        document.getElementById('btcSpread').textContent = '$0.10';
+        document.getElementById('optionsIV').textContent = '43.16%';
+        document.getElementById('optionsDelta').textContent = '0.0802';
+        document.getElementById('totalRecords').textContent = '1,234,567';
+    }
+}
+
+// 更新 FR 圖表
+function updateFRChart(data) {
+    // 提取日期和數據
+    const dates = [...new Set(data.map(d => d.date))].sort();
+    const binanceData = dates.map(date => {
+        const item = data.find(d => d.date === date && d.exchange === 'binance');
+        return item ? item.avg_fr : null;
+    });
+    const mexcData = dates.map(date => {
+        const item = data.find(d => d.date === date && d.exchange === 'mexc');
+        return item ? item.avg_fr : null;
+    });
+    
+    frChart.data.labels = dates;
+    frChart.data.datasets[0].data = binanceData;
+    frChart.data.datasets[1].data = mexcData;
+    frChart.update();
+}
+
+// 更新 FR 表格
+function updateFRTable(data) {
+    const tbody = document.getElementById('frStatsTable');
+    
+    // 按交易所和交易對分組
+    const grouped = {};
+    data.forEach(item => {
+        const key = `${item.exchange}-${item.symbol}`;
+        if (!grouped[key]) {
+            grouped[key] = { exchange: item.exchange, symbol: item.symbol };
+        }
+        if (item.period === '7d') {
+            grouped[key].max_7d = item.max_fr;
+            grouped[key].min_7d = item.min_fr;
+        } else if (item.period === '14d') {
+            grouped[key].max_14d = item.max_fr;
+            grouped[key].min_14d = item.min_fr;
+        }
+    });
+    
+    tbody.innerHTML = Object.values(grouped).map(item => `
+        <tr>
+            <td><span class="badge badge-custom bg-primary">${item.exchange}</span></td>
+            <td><strong>${item.symbol}</strong></td>
+            <td class="positive">${(item.max_7d * 100).toFixed(4)}%</td>
+            <td class="negative">${(item.min_7d * 100).toFixed(4)}%</td>
+            <td class="positive">${(item.max_14d * 100).toFixed(4)}%</td>
+            <td class="negative">${(item.min_14d * 100).toFixed(4)}%</td>
+        </tr>
+    `).join('');
+}
+
+// 更新 Spread 圖表
+function updateSpreadChart(data) {
+    const dates = [...new Set(data.map(d => d.date))].sort();
+    const avgData = dates.map(date => {
+        const items = data.filter(d => d.date === date);
+        return items.length > 0 ? 
+            items.reduce((sum, d) => sum + d.avg_spread, 0) / items.length : null;
+    });
+    
+    spreadChart.data.labels = dates;
+    spreadChart.data.datasets[0].data = avgData;
+    spreadChart.update();
+}
+
+// 更新 Spread 表格
+function updateSpreadTable(data) {
+    const tbody = document.getElementById('spreadStatsTable');
+    
+    tbody.innerHTML = data.slice(0, 10).map(item => `
+        <tr>
+            <td><span class="badge badge-custom bg-info">${item.exchange}</span></td>
+            <td><strong>${item.symbol}</strong></td>
+            <td>$${item.avg_spread.toFixed(6)}</td>
+            <td>$${item.max_spread.toFixed(6)}</td>
+            <td>$${item.min_spread.toFixed(6)}</td>
+        </tr>
+    `).join('');
+}
+
+// 更新 Options 圖表
+function updateOptionsCharts(data) {
+    if (data.length === 0) return;
+    
+    // IV 趨勢
+    const dates = data.map(d => d.date).slice(-30);
+    const ivData = data.map(d => d.avg_iv).slice(-30);
+    
+    ivChart.data.labels = dates;
+    ivChart.data.datasets[0].data = ivData;
+    ivChart.update();
+    
+    // Greeks 雷達圖（使用最新數據）
+    const latest = data[data.length - 1];
+    greeksChart.data.datasets[0].data = [
+        Math.abs(latest.avg_delta || 0) * 100,
+        Math.abs(latest.avg_gamma || 0) * 1000,
+        Math.abs(latest.avg_vega || 0) / 10,
+        Math.abs(latest.avg_theta || 0) * 10,
+        Math.abs(latest.avg_rho || 0) * 100
+    ];
+    greeksChart.update();
+}
+
+// 更新最後更新時間
+function updateLastUpdateTime() {
+    const now = new Date();
+    const timeString = now.toLocaleTimeString('zh-TW');
+    document.getElementById('lastUpdate').textContent = timeString;
+}
+
+// 模擬數據（當 API 無法使用時）
+function useMockFRData() {
+    const dates = Array.from({length: 14}, (_, i) => {
+        const d = new Date();
+        d.setDate(d.getDate() - (13 - i));
+        return d.toISOString().split('T')[0];
+    });
+    
+    const mockData = dates.flatMap(date => [
+        {
+            date: date,
+            exchange: 'binance',
+            symbol: 'BTC/USDT',
+            period: '14d',
+            avg_fr: 0.0004 + Math.random() * 0.0001,
+            max_fr: 0.0005,
+            min_fr: 0.0003
+        },
+        {
+            date: date,
+            exchange: 'mexc',
+            symbol: 'BTC/USDT',
+            period: '14d',
+            avg_fr: 0.0004 + Math.random() * 0.0001,
+            max_fr: 0.0005,
+            min_fr: 0.0003
+        }
+    ]);
+    
+    updateFRChart(mockData);
+    updateFRTable(mockData);
+}
+
+function useMockSpreadData() {
+    const dates = Array.from({length: 14}, (_, i) => {
+        const d = new Date();
+        d.setDate(d.getDate() - (13 - i));
+        return d.toISOString().split('T')[0];
+    });
+    
+    const mockData = dates.map(date => ({
+        date: date,
+        exchange: 'binance',
+        symbol: 'BTC/USDT',
+        avg_spread: 0.1 + Math.random() * 0.05,
+        max_spread: 0.2,
+        min_spread: 0.05
+    }));
+    
+    updateSpreadChart(mockData);
+    updateSpreadTable(mockData);
+}
+
+function useMockOptionsData() {
+    const dates = Array.from({length: 7}, (_, i) => {
+        const d = new Date();
+        d.setDate(d.getDate() - (6 - i));
+        return d.toISOString().split('T')[0];
+    });
+    
+    const mockData = dates.map(date => ({
+        date: date,
+        symbol: 'BTC-30JAN26-90000-C',
+        avg_iv: 0.43 + Math.random() * 0.02,
+        avg_delta: 0.08 + Math.random() * 0.01,
+        avg_gamma: 0.0000616,
+        avg_vega: 130.4,
+        avg_theta: -57.3,
+        avg_rho: 0.01
+    }));
+    
+    updateOptionsCharts(mockData);
+}
