@@ -1,0 +1,391 @@
+"""
+加密貨幣數據收集器
+- Options Greeks: 毫秒級，直接寫入資料庫
+- Funding Rate & Order Book: Log 方式記錄
+"""
+import ccxt
+import json
+import logging
+import time
+import asyncio
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List
+import psycopg2
+from psycopg2.extras import execute_values
+from threading import Thread
+
+# ==================== 配置 ====================
+# 交易所與交易對
+EXCHANGES = ["mexc", "binance", "deribit"]
+SPOT_SYMBOLS = ["BTC/USDT", "ETH/USDT"]
+OPTIONS_SYMBOLS = [
+    "BTC-30JAN26-90000-C",
+    "BTC-30JAN26-90000-P",
+    "BTC-USDC-30JAN26-90000-C",  # 根據你的截圖
+]
+
+# 收集間隔
+FR_OB_INTERVAL = 5  # FR 和 OB 每 5 秒
+OPTIONS_INTERVAL_MS = 100  # Options 每 100 毫秒
+
+# 資料庫連線
+DB_CONFIG = {
+    "host": "localhost",
+    "port": 5432,
+    "database": "crypto_metrics",
+    "user": "postgres",
+    "password": "your_password"
+}
+
+# Log 設定
+BASE_DIR = Path(__file__).resolve().parent.parent
+LOG_DIR = BASE_DIR / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+# ==================== Logger 設定 ====================
+# FR & OB Logger
+fr_ob_logger = logging.getLogger("fr_ob_collector")
+fr_ob_logger.setLevel(logging.INFO)
+fr_ob_handler = logging.FileHandler(LOG_DIR / "fr_ob_metrics.log", encoding="utf-8")
+fr_ob_handler.setFormatter(logging.Formatter("%(message)s"))
+fr_ob_logger.addHandler(fr_ob_handler)
+
+# Options Logger (備用)
+options_logger = logging.getLogger("options_collector")
+options_logger.setLevel(logging.INFO)
+options_handler = logging.FileHandler(LOG_DIR / "options_metrics.log", encoding="utf-8")
+options_handler.setFormatter(logging.Formatter("%(message)s"))
+options_logger.addHandler(options_handler)
+
+# System Logger
+sys_logger = logging.getLogger("system")
+sys_logger.setLevel(logging.INFO)
+sys_handler = logging.FileHandler(LOG_DIR / "system.log", encoding="utf-8")
+sys_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+sys_logger.addHandler(sys_handler)
+
+# ==================== 交易所管理 ====================
+EXCHANGE_OBJS = {}
+
+def get_exchange(ex_id: str):
+    """取得或建立交易所物件"""
+    if ex_id in EXCHANGE_OBJS:
+        return EXCHANGE_OBJS[ex_id]
+    
+    ex_class = getattr(ccxt, ex_id)
+    config = {"enableRateLimit": True}
+    
+    # Deribit 需要額外設定
+    if ex_id == "deribit":
+        config["options"] = {"defaultType": "option"}
+    
+    ex = ex_class(config)
+    EXCHANGE_OBJS[ex_id] = ex
+    return ex
+
+# ==================== 時間戳記 ====================
+def now_ts():
+    """回傳 ISO8601 字串和毫秒時間戳"""
+    now = datetime.now(timezone.utc)
+    ts_ms = int(now.timestamp() * 1000)
+    # 包含毫秒的 ISO 格式
+    iso_with_ms = now.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+    return iso_with_ms, ts_ms
+
+# ==================== 資料庫操作 ====================
+class DatabaseManager:
+    def __init__(self, config):
+        self.config = config
+        self.conn = None
+        self.cursor = None
+        self.connect()
+    
+    def connect(self):
+        """建立資料庫連線"""
+        try:
+            self.conn = psycopg2.connect(**self.config)
+            self.cursor = self.conn.cursor()
+            sys_logger.info("資料庫連線成功")
+        except Exception as e:
+            sys_logger.error(f"資料庫連線失敗: {e}")
+            self.conn = None
+    
+    def insert_options_greeks(self, records: List[Dict]):
+        """批次插入 Options Greeks 數據"""
+        if not self.conn or not records:
+            return
+        
+        try:
+            # 取得當前日期作為表名後綴
+            date_suffix = datetime.now(timezone.utc).strftime('%Y%m%d')
+            table_name = f"options_greeks_{date_suffix}"
+            
+            # 確保表存在
+            self.ensure_table_exists(table_name)
+            
+            # 準備插入數據
+            values = []
+            for r in records:
+                values.append((
+                    r['ts_ms'],
+                    r['ts'],
+                    r['exchange'],
+                    r['symbol'],
+                    r.get('price'),
+                    r.get('iv'),
+                    r.get('delta'),
+                    r.get('gamma'),
+                    r.get('vega'),
+                    r.get('theta'),
+                    r.get('rho'),
+                    json.dumps(r)  # 儲存完整 JSON 以備不時之需
+                ))
+            
+            query = f"""
+                INSERT INTO {table_name} 
+                (ts_ms, ts, exchange, symbol, price, iv, delta, gamma, vega, theta, rho, raw_data)
+                VALUES %s
+            """
+            
+            execute_values(self.cursor, query, values)
+            self.conn.commit()
+            
+        except Exception as e:
+            sys_logger.error(f"插入 Options Greeks 失敗: {e}")
+            self.conn.rollback()
+    
+    def ensure_table_exists(self, table_name: str):
+        """確保日期分片表存在"""
+        try:
+            create_query = f"""
+                CREATE TABLE IF NOT EXISTS {table_name} (
+                    ts_ms BIGINT NOT NULL,
+                    ts TIMESTAMPTZ NOT NULL,
+                    exchange VARCHAR(50),
+                    symbol VARCHAR(100),
+                    price NUMERIC(20,8),
+                    iv NUMERIC(10,6),
+                    delta NUMERIC(10,6),
+                    gamma NUMERIC(10,6),
+                    vega NUMERIC(10,6),
+                    theta NUMERIC(10,6),
+                    rho NUMERIC(10,6),
+                    raw_data JSONB,
+                    PRIMARY KEY (ts_ms, exchange, symbol)
+                );
+                
+                CREATE INDEX IF NOT EXISTS idx_{table_name}_ts ON {table_name} (ts);
+                CREATE INDEX IF NOT EXISTS idx_{table_name}_symbol ON {table_name} (symbol);
+            """
+            self.cursor.execute(create_query)
+            self.conn.commit()
+        except Exception as e:
+            sys_logger.error(f"建立表 {table_name} 失敗: {e}")
+    
+    def close(self):
+        """關閉資料庫連線"""
+        if self.cursor:
+            self.cursor.close()
+        if self.conn:
+            self.conn.close()
+
+# ==================== Funding Rate 收集 ====================
+def collect_funding_rate(ex_id: str, symbol: str):
+    """收集 Funding Rate 並記錄到 Log"""
+    ex = get_exchange(ex_id)
+    
+    try:
+        fr = ex.fetch_funding_rate(symbol)
+    except Exception as e:
+        sys_logger.warning(f"[FR] {ex_id} {symbol} 抓取失敗: {e}")
+        return
+    
+    if not fr or "fundingRate" not in fr:
+        sys_logger.warning(f"[FR] {ex_id} {symbol} 資料不完整")
+        return
+    
+    iso, ts_ms = now_ts()
+    
+    record = {
+        "ts": iso,
+        "ts_ms": ts_ms,
+        "exchange": ex_id,
+        "symbol": symbol,
+        "metric": "funding_rate",
+        "tag": "FR",  # 方便後續分析
+        "funding_rate": fr["fundingRate"],
+        "funding_timestamp": fr.get("fundingTimestamp"),
+        "next_funding_time": fr.get("fundingDatetime"),
+    }
+    
+    fr_ob_logger.info(json.dumps(record, ensure_ascii=False))
+
+# ==================== Order Book 收集 ====================
+def collect_orderbook_spread(ex_id: str, symbol: str):
+    """收集 Order Book Spread 並記錄到 Log"""
+    ex = get_exchange(ex_id)
+    
+    try:
+        ob = ex.fetch_order_book(symbol, limit=5)
+    except Exception as e:
+        sys_logger.warning(f"[OB] {ex_id} {symbol} 抓取失敗: {e}")
+        return
+    
+    bids = ob.get("bids") or []
+    asks = ob.get("asks") or []
+    
+    if not bids or not asks:
+        sys_logger.warning(f"[OB] {ex_id} {symbol} 沒有掛單")
+        return
+    
+    best_bid = bids[0][0]
+    best_ask = asks[0][0]
+    spread = best_ask - best_bid
+    spread_pct = (spread / best_bid) * 100 if best_bid > 0 else 0
+    
+    # 第三檔
+    bid3 = bids[2][0] if len(bids) >= 3 else None
+    ask3 = asks[2][0] if len(asks) >= 3 else None
+    
+    iso, ts_ms = now_ts()
+    
+    record = {
+        "ts": iso,
+        "ts_ms": ts_ms,
+        "exchange": ex_id,
+        "symbol": symbol,
+        "metric": "orderbook_spread",
+        "tag": "OB",  # 方便後續分析
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "spread": spread,
+        "spread_pct": spread_pct,
+        "bid3": bid3,
+        "ask3": ask3,
+        "bid_volume": bids[0][1],
+        "ask_volume": asks[0][1],
+    }
+    
+    fr_ob_logger.info(json.dumps(record, ensure_ascii=False))
+
+# ==================== Options Greeks 收集 ====================
+def collect_options_greeks(ex_id: str, symbol: str, db_manager: DatabaseManager):
+    """收集 Options Greeks（毫秒級）"""
+    ex = get_exchange(ex_id)
+    
+    try:
+        # Deribit 的 Greeks 數據
+        ticker = ex.fetch_ticker(symbol)
+        
+        iso, ts_ms = now_ts()
+        
+        record = {
+            "ts": iso,
+            "ts_ms": ts_ms,
+            "exchange": ex_id,
+            "symbol": symbol,
+            "metric": "options_greeks",
+            "tag": "OPTIONS",
+            # 價格相關
+            "price": ticker.get('last'),
+            "mark_price": ticker.get('markPrice'),
+            "index_price": ticker.get('indexPrice'),
+            "underlying_price": ticker.get('underlyingPrice'),
+            # Greeks
+            "iv": ticker.get('impliedVolatility') or ticker.get('info', {}).get('mark_iv'),
+            "delta": ticker.get('info', {}).get('greeks', {}).get('delta'),
+            "gamma": ticker.get('info', {}).get('greeks', {}).get('gamma'),
+            "vega": ticker.get('info', {}).get('greeks', {}).get('vega'),
+            "theta": ticker.get('info', {}).get('greeks', {}).get('theta'),
+            "rho": ticker.get('info', {}).get('greeks', {}).get('rho'),
+            # 其他
+            "volume_24h": ticker.get('quoteVolume'),
+            "open_interest": ticker.get('info', {}).get('open_interest'),
+        }
+        
+        # 寫入資料庫
+        if db_manager:
+            db_manager.insert_options_greeks([record])
+        
+        # 也寫一份到 log 以備份
+        options_logger.info(json.dumps(record, ensure_ascii=False))
+        
+    except Exception as e:
+        sys_logger.warning(f"[OPTIONS] {ex_id} {symbol} 抓取失敗: {e}")
+
+# ==================== FR & OB 收集執行緒 ====================
+def fr_ob_collector_thread():
+    """FR 和 OB 收集執行緒（每 5 秒）"""
+    sys_logger.info("FR & OB 收集器啟動")
+    
+    while True:
+        start = time.time()
+        
+        for ex_id in ["mexc", "binance"]:
+            for symbol in SPOT_SYMBOLS:
+                # Funding Rate
+                collect_funding_rate(ex_id, symbol)
+                # Order Book
+                collect_orderbook_spread(ex_id, symbol)
+                time.sleep(0.5)  # 避免 API rate limit
+        
+        elapsed = time.time() - start
+        sleep_sec = max(0, FR_OB_INTERVAL - elapsed)
+        if sleep_sec > 0:
+            time.sleep(sleep_sec)
+
+# ==================== Options 收集執行緒 ====================
+def options_collector_thread(db_manager: DatabaseManager):
+    """Options Greeks 收集執行緒（毫秒級）"""
+    sys_logger.info("Options Greeks 收集器啟動（毫秒級）")
+    
+    while True:
+        start_ms = time.time() * 1000
+        
+        for symbol in OPTIONS_SYMBOLS:
+            collect_options_greeks("deribit", symbol, db_manager)
+        
+        elapsed_ms = (time.time() * 1000) - start_ms
+        sleep_ms = max(0, OPTIONS_INTERVAL_MS - elapsed_ms)
+        if sleep_ms > 0:
+            time.sleep(sleep_ms / 1000)
+
+# ==================== 主程式 ====================
+def main():
+    """主程式入口"""
+    print("=" * 60)
+    print("🚀 加密貨幣數據收集系統啟動")
+    print("=" * 60)
+    print(f"📁 Log 目錄: {LOG_DIR}")
+    print(f"📊 Options 間隔: {OPTIONS_INTERVAL_MS} ms")
+    print(f"📊 FR/OB 間隔: {FR_OB_INTERVAL} 秒")
+    print("=" * 60)
+    
+    sys_logger.info("系統啟動")
+    
+    # 初始化資料庫
+    db_manager = DatabaseManager(DB_CONFIG)
+    
+    # 啟動 FR & OB 收集執行緒
+    fr_ob_thread = Thread(target=fr_ob_collector_thread, daemon=True)
+    fr_ob_thread.start()
+    
+    # 啟動 Options 收集執行緒
+    options_thread = Thread(target=lambda: options_collector_thread(db_manager), daemon=True)
+    options_thread.start()
+    
+    print("✅ 所有收集器已啟動")
+    print("按 Ctrl+C 停止...")
+    
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n⏹️  收集器停止中...")
+        sys_logger.info("系統停止")
+        db_manager.close()
+        print("✅ 已停止")
+
+if __name__ == "__main__":
+    main()
