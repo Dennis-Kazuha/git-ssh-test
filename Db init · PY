@@ -1,0 +1,253 @@
+"""
+資料庫初始化與管理腳本
+- 建立資料庫結構
+- 時間分片管理
+- 清理舊數據
+"""
+import psycopg2
+from datetime import datetime, timedelta
+import sys
+
+DB_CONFIG = {
+    "host": "localhost",
+    "port": 5432,
+    "database": "crypto_metrics",
+    "user": "postgres",
+    "password": "your_password"
+}
+
+def create_database():
+    """建立資料庫"""
+    conn = psycopg2.connect(
+        host=DB_CONFIG["host"],
+        port=DB_CONFIG["port"],
+        database="postgres",
+        user=DB_CONFIG["user"],
+        password=DB_CONFIG["password"]
+    )
+    conn.autocommit = True
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute(f"CREATE DATABASE {DB_CONFIG['database']}")
+        print(f"✅ 資料庫 {DB_CONFIG['database']} 建立成功")
+    except psycopg2.errors.DuplicateDatabase:
+        print(f"ℹ️  資料庫 {DB_CONFIG['database']} 已存在")
+    
+    cursor.close()
+    conn.close()
+
+def init_tables():
+    """初始化表結構"""
+    conn = psycopg2.connect(**DB_CONFIG)
+    cursor = conn.cursor()
+    
+    # 1. Options Greeks 模板表（用於建立每日分片）
+    print("📋 建立 Options Greeks 表結構...")
+    
+    # 這是一個範例表，實際的表會按日期動態建立
+    # 例如: options_greeks_20241212
+    
+    # 2. FR & OB 彙總表（從 Log 匯入的統計數據）
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS funding_rate_stats (
+            date DATE NOT NULL,
+            exchange VARCHAR(50),
+            symbol VARCHAR(100),
+            period VARCHAR(20),  -- '14d' or '7d'
+            max_fr NUMERIC(10,8),
+            min_fr NUMERIC(10,8),
+            avg_fr NUMERIC(10,8),
+            std_fr NUMERIC(10,8),
+            count INTEGER,
+            updated_at TIMESTAMPTZ DEFAULT NOW(),
+            PRIMARY KEY (date, exchange, symbol, period)
+        );
+        
+        CREATE INDEX IF NOT EXISTS idx_fr_stats_date ON funding_rate_stats (date);
+        CREATE INDEX IF NOT EXISTS idx_fr_stats_symbol ON funding_rate_stats (symbol);
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS orderbook_spread_stats (
+            date DATE NOT NULL,
+            exchange VARCHAR(50),
+            symbol VARCHAR(100),
+            period VARCHAR(20),  -- '14d' or '7d'
+            max_spread NUMERIC(20,8),
+            min_spread NUMERIC(20,8),
+            avg_spread NUMERIC(20,8),
+            max_spread_pct NUMERIC(10,6),
+            min_spread_pct NUMERIC(10,6),
+            avg_spread_pct NUMERIC(10,6),
+            count INTEGER,
+            updated_at TIMESTAMPTZ DEFAULT NOW(),
+            PRIMARY KEY (date, exchange, symbol, period)
+        );
+        
+        CREATE INDEX IF NOT EXISTS idx_ob_stats_date ON orderbook_spread_stats (date);
+        CREATE INDEX IF NOT EXISTS idx_ob_stats_symbol ON orderbook_spread_stats (symbol);
+    """)
+    
+    # 3. Options Greeks 統計表
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS options_greeks_stats (
+            date DATE NOT NULL,
+            symbol VARCHAR(100),
+            period VARCHAR(20),  -- '14d' or '7d'
+            max_iv NUMERIC(10,6),
+            min_iv NUMERIC(10,6),
+            avg_iv NUMERIC(10,6),
+            max_delta NUMERIC(10,6),
+            min_delta NUMERIC(10,6),
+            avg_delta NUMERIC(10,6),
+            max_gamma NUMERIC(10,6),
+            min_gamma NUMERIC(10,6),
+            avg_gamma NUMERIC(10,6),
+            max_vega NUMERIC(10,6),
+            min_vega NUMERIC(10,6),
+            avg_vega NUMERIC(10,6),
+            max_theta NUMERIC(10,6),
+            min_theta NUMERIC(10,6),
+            avg_theta NUMERIC(10,6),
+            count INTEGER,
+            updated_at TIMESTAMPTZ DEFAULT NOW(),
+            PRIMARY KEY (date, symbol, period)
+        );
+        
+        CREATE INDEX IF NOT EXISTS idx_options_stats_date ON options_greeks_stats (date);
+        CREATE INDEX IF NOT EXISTS idx_options_stats_symbol ON options_greeks_stats (symbol);
+    """)
+    
+    conn.commit()
+    print("✅ 所有表結構建立完成")
+    
+    cursor.close()
+    conn.close()
+
+def create_daily_options_table(date_str: str):
+    """建立每日 Options Greeks 分片表"""
+    conn = psycopg2.connect(**DB_CONFIG)
+    cursor = conn.cursor()
+    
+    table_name = f"options_greeks_{date_str}"
+    
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            ts_ms BIGINT NOT NULL,
+            ts TIMESTAMPTZ NOT NULL,
+            exchange VARCHAR(50),
+            symbol VARCHAR(100),
+            price NUMERIC(20,8),
+            mark_price NUMERIC(20,8),
+            index_price NUMERIC(20,8),
+            underlying_price NUMERIC(20,8),
+            iv NUMERIC(10,6),
+            delta NUMERIC(10,6),
+            gamma NUMERIC(10,6),
+            vega NUMERIC(10,6),
+            theta NUMERIC(10,6),
+            rho NUMERIC(10,6),
+            volume_24h NUMERIC(20,8),
+            open_interest NUMERIC(20,8),
+            raw_data JSONB,
+            PRIMARY KEY (ts_ms, exchange, symbol)
+        );
+        
+        CREATE INDEX IF NOT EXISTS idx_{table_name}_ts ON {table_name} (ts);
+        CREATE INDEX IF NOT EXISTS idx_{table_name}_symbol ON {table_name} (symbol);
+        CREATE INDEX IF NOT EXISTS idx_{table_name}_iv ON {table_name} (iv);
+    """)
+    
+    conn.commit()
+    print(f"✅ 建立表: {table_name}")
+    
+    cursor.close()
+    conn.close()
+
+def cleanup_old_tables(days_to_keep=30):
+    """清理舊的分片表"""
+    conn = psycopg2.connect(**DB_CONFIG)
+    cursor = conn.cursor()
+    
+    cutoff_date = datetime.now() - timedelta(days=days_to_keep)
+    
+    # 取得所有 options_greeks_ 開頭的表
+    cursor.execute("""
+        SELECT tablename FROM pg_tables 
+        WHERE schemaname = 'public' 
+        AND tablename LIKE 'options_greeks_%'
+    """)
+    
+    tables = cursor.fetchall()
+    
+    for (table_name,) in tables:
+        # 從表名解析日期
+        try:
+            date_part = table_name.replace('options_greeks_', '')
+            table_date = datetime.strptime(date_part, '%Y%m%d')
+            
+            if table_date < cutoff_date:
+                cursor.execute(f"DROP TABLE {table_name}")
+                print(f"🗑️  刪除舊表: {table_name}")
+        except:
+            continue
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def prepare_future_tables(days=7):
+    """預先建立未來幾天的表"""
+    today = datetime.now()
+    
+    for i in range(days):
+        date = today + timedelta(days=i)
+        date_str = date.strftime('%Y%m%d')
+        create_daily_options_table(date_str)
+
+def main():
+    """主程式"""
+    print("=" * 60)
+    print("🔧 資料庫初始化與管理")
+    print("=" * 60)
+    
+    if len(sys.argv) > 1:
+        command = sys.argv[1]
+        
+        if command == "init":
+            print("\n1️⃣ 建立資料庫...")
+            create_database()
+            
+            print("\n2️⃣ 初始化表結構...")
+            init_tables()
+            
+            print("\n3️⃣ 建立未來 7 天的分片表...")
+            prepare_future_tables(7)
+            
+            print("\n✅ 資料庫初始化完成")
+        
+        elif command == "cleanup":
+            days = int(sys.argv[2]) if len(sys.argv) > 2 else 30
+            print(f"\n🗑️  清理 {days} 天前的舊表...")
+            cleanup_old_tables(days)
+            print("\n✅ 清理完成")
+        
+        elif command == "prepare":
+            days = int(sys.argv[2]) if len(sys.argv) > 2 else 7
+            print(f"\n📅 建立未來 {days} 天的分片表...")
+            prepare_future_tables(days)
+            print("\n✅ 建立完成")
+        
+        else:
+            print("\n❌ 未知命令")
+            print("可用命令: init, cleanup, prepare")
+    
+    else:
+        print("\n使用方式:")
+        print("  python db_init.py init         - 初始化資料庫")
+        print("  python db_init.py cleanup [天數] - 清理舊表（預設 30 天）")
+        print("  python db_init.py prepare [天數] - 建立未來表（預設 7 天）")
+
+if __name__ == "__main__":
+    main()
