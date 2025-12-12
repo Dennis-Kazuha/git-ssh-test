@@ -1,0 +1,378 @@
+# ✅ 部署檢查清單
+
+完整的系統部署驗證步驟
+
+## 📋 安裝前檢查
+
+### 環境檢查
+- [ ] Python 3.8+ 已安裝
+  ```bash
+  python3 --version
+  ```
+- [ ] PostgreSQL 12+ 已安裝
+  ```bash
+  psql --version
+  ```
+- [ ] pip 已安裝
+  ```bash
+  pip3 --version
+  ```
+- [ ] 磁碟空間充足 (建議 > 10GB)
+  ```bash
+  df -h
+  ```
+
+## 🔧 安裝步驟檢查
+
+### Step 1: Python 套件
+- [ ] 套件安裝成功
+  ```bash
+  pip install -r requirements.txt --break-system-packages
+  ```
+- [ ] 驗證 ccxt
+  ```bash
+  python3 -c "import ccxt; print('✅ ccxt OK')"
+  ```
+- [ ] 驗證 psycopg2
+  ```bash
+  python3 -c "import psycopg2; print('✅ psycopg2 OK')"
+  ```
+- [ ] 驗證 fastapi
+  ```bash
+  python3 -c "import fastapi; print('✅ fastapi OK')"
+  ```
+
+### Step 2: 資料庫設定
+- [ ] PostgreSQL 服務運行中
+  ```bash
+  sudo systemctl status postgresql
+  ```
+- [ ] 資料庫已建立
+  ```bash
+  sudo -u postgres psql -c "\l" | grep crypto_metrics
+  ```
+- [ ] 使用者已建立
+  ```bash
+  sudo -u postgres psql -c "\du" | grep crypto_user
+  ```
+- [ ] 權限已授予
+  ```bash
+  sudo -u postgres psql -d crypto_metrics -c "\dp"
+  ```
+
+### Step 3: 配置檔案
+- [ ] 修改 `collectors/main_collector.py` 的 DB_CONFIG
+- [ ] 修改 `database/db_init.py` 的 DB_CONFIG
+- [ ] 修改 `scripts/analyze_logs.py` 的 DB_CONFIG
+- [ ] 修改 `frontend/api_server.py` 的 DB_CONFIG
+- [ ] 所有密碼一致
+
+### Step 4: 資料庫初始化
+- [ ] 執行初始化腳本
+  ```bash
+  python3 database/db_init.py init
+  ```
+- [ ] 確認統計表已建立
+  ```bash
+  psql -h localhost -U crypto_user -d crypto_metrics -c "\dt"
+  ```
+  應該看到:
+  - `funding_rate_stats`
+  - `orderbook_spread_stats`
+  - `options_greeks_stats`
+
+- [ ] 確認分片表已建立
+  ```bash
+  psql -h localhost -U crypto_user -d crypto_metrics -c "\dt options_greeks*"
+  ```
+  應該看到至少 7 個 `options_greeks_YYYYMMDD` 表
+
+## 🚀 啟動檢查
+
+### 數據收集器
+- [ ] 收集器啟動成功
+  ```bash
+  python3 collectors/main_collector.py
+  ```
+- [ ] 看到啟動訊息
+  ```
+  ✅ 所有收集器已啟動
+  ```
+- [ ] Log 檔案開始寫入
+  ```bash
+  ls -l logs/
+  # 應該看到:
+  # - fr_ob_metrics.log
+  # - options_metrics.log
+  # - system.log
+  ```
+- [ ] FR & OB 數據正常收集
+  ```bash
+  tail -f logs/fr_ob_metrics.log
+  # 應該每 5 秒看到新數據
+  ```
+- [ ] Options 數據正常收集
+  ```bash
+  tail -f logs/options_metrics.log
+  # 應該每 100ms 看到新數據
+  ```
+
+### API 伺服器
+- [ ] API 啟動成功
+  ```bash
+  cd frontend && python3 api_server.py
+  ```
+- [ ] API 健康檢查通過
+  ```bash
+  curl http://localhost:8000/api/health
+  # 應該回傳: {"status": "healthy"}
+  ```
+- [ ] API 文檔可訪問
+  ```
+  開啟瀏覽器: http://localhost:8000/docs
+  ```
+
+### Log 分析
+- [ ] 等待 5 分鐘讓數據收集
+- [ ] 執行 Log 分析
+  ```bash
+  python3 scripts/analyze_logs.py
+  ```
+- [ ] 確認統計數據已生成
+  ```bash
+  psql -h localhost -U crypto_user -d crypto_metrics \
+    -c "SELECT COUNT(*) FROM funding_rate_stats;"
+  # 應該 > 0
+  ```
+
+## 🌐 前端檢查
+
+### 網站訪問
+- [ ] 前端網站可訪問
+  ```
+  開啟瀏覽器: http://localhost:8000/static/index.html
+  ```
+- [ ] 頁面正常載入（無錯誤訊息）
+- [ ] 看到系統狀態: "系統運行中"
+- [ ] 最後更新時間正確顯示
+
+### 快速指標卡片
+- [ ] BTC Funding Rate 顯示數值（不是 "--"）
+- [ ] BTC Spread 顯示數值
+- [ ] Options IV 顯示數值
+- [ ] Delta 顯示數值
+- [ ] 總記錄數顯示數值
+
+### 圖表顯示
+- [ ] Funding Rate 趨勢圖有數據線
+- [ ] FR 統計表有數據
+- [ ] Spread 趨勢圖有數據線
+- [ ] Spread 統計表有數據
+- [ ] Options IV 趨勢圖有數據線
+- [ ] Options Greeks 雷達圖有數據
+
+### API 端點測試
+- [ ] `/api/funding-rate-stats` 回傳數據
+  ```bash
+  curl "http://localhost:8000/api/funding-rate-stats?days=7"
+  ```
+- [ ] `/api/spread-stats` 回傳數據
+  ```bash
+  curl "http://localhost:8000/api/spread-stats?days=7"
+  ```
+- [ ] `/api/options-stats` 回傳數據
+  ```bash
+  curl "http://localhost:8000/api/options-stats?days=7"
+  ```
+- [ ] `/api/quick-metrics` 回傳數據
+  ```bash
+  curl "http://localhost:8000/api/quick-metrics"
+  ```
+
+## 📊 Grafana 檢查（可選）
+
+### Grafana 安裝
+- [ ] Grafana 已安裝
+- [ ] Grafana 服務運行中
+  ```bash
+  sudo systemctl status grafana-server
+  ```
+- [ ] Grafana 可訪問
+  ```
+  開啟瀏覽器: http://localhost:3000
+  ```
+
+### Data Source 設定
+- [ ] PostgreSQL Data Source 已新增
+- [ ] 連線測試通過（點選 "Test" 按鈕）
+- [ ] 可以執行查詢測試:
+  ```sql
+  SELECT COUNT(*) FROM funding_rate_stats;
+  ```
+
+### Dashboard 匯入
+- [ ] Dashboard JSON 已匯入
+- [ ] 所有面板正常顯示
+- [ ] 數據正確載入
+- [ ] 圖表互動正常（可縮放、可點選）
+
+## 🔄 持續運行檢查
+
+### 定時任務設定（建議）
+- [ ] 設定每日 Log 分析
+  ```bash
+  crontab -e
+  # 加入: 0 1 * * * cd /path/to/crypto_monitor && python3 scripts/analyze_logs.py
+  ```
+- [ ] 設定每日建立分片表
+  ```bash
+  # 加入: 0 2 * * * cd /path/to/crypto_monitor && python3 database/db_init.py prepare 7
+  ```
+- [ ] 設定每週清理舊表
+  ```bash
+  # 加入: 0 3 * * 0 cd /path/to/crypto_monitor && python3 database/db_init.py cleanup 30
+  ```
+
+### 監控設定
+- [ ] 收集器 PID 記錄
+  ```bash
+  ps aux | grep main_collector.py
+  ```
+- [ ] API PID 記錄
+  ```bash
+  ps aux | grep api_server.py
+  ```
+- [ ] Log 檔案大小監控
+  ```bash
+  du -sh logs/
+  ```
+
+## 🔍 功能驗證
+
+### 數據收集驗證
+- [ ] 等待 10 分鐘
+- [ ] 檢查 Log 檔案行數
+  ```bash
+  wc -l logs/fr_ob_metrics.log
+  # FR & OB: 應該有 (10 * 60 / 5) * 交易所數 * 交易對數 * 2 行
+  ```
+  ```bash
+  wc -l logs/options_metrics.log
+  # Options: 應該有 (10 * 60 / 0.1) * Options數 行
+  ```
+- [ ] 檢查資料庫記錄數
+  ```bash
+  psql -h localhost -U crypto_user -d crypto_metrics \
+    -c "SELECT COUNT(*) FROM options_greeks_$(date +%Y%m%d);"
+  ```
+
+### 統計功能驗證
+- [ ] 執行 Log 分析後統計表有數據
+- [ ] 7天統計數據正確
+- [ ] 14天統計數據正確
+- [ ] 最大最小值合理
+
+### 前端功能驗證
+- [ ] 圖表可以互動（滑鼠懸停顯示數值）
+- [ ] 響應式設計正常（手機/平板/桌面）
+- [ ] 每 30 秒自動更新
+- [ ] 導航列功能正常
+
+## 🐛 故障排除檢查
+
+如果出現問題，按以下順序檢查:
+
+### 資料庫問題
+1. [ ] PostgreSQL 服務運行
+   ```bash
+   sudo systemctl status postgresql
+   ```
+2. [ ] 可以連線資料庫
+   ```bash
+   psql -h localhost -U crypto_user -d crypto_metrics
+   ```
+3. [ ] 密碼正確
+4. [ ] 權限正確
+
+### 收集器問題
+1. [ ] 查看系統 Log
+   ```bash
+   tail -f logs/system.log
+   ```
+2. [ ] 檢查網路連線
+   ```bash
+   ping api.binance.com
+   ```
+3. [ ] 測試 API 訪問
+   ```bash
+   python3 -c "import ccxt; ex = ccxt.binance(); print(ex.fetch_ticker('BTC/USDT'))"
+   ```
+
+### API 問題
+1. [ ] 檢查 Port 8000 是否被占用
+   ```bash
+   lsof -i :8000
+   ```
+2. [ ] 檢查 API 日誌
+3. [ ] 測試資料庫連線
+
+### 前端問題
+1. [ ] 開啟瀏覽器 Console (F12)
+2. [ ] 檢查是否有 JavaScript 錯誤
+3. [ ] 檢查網路請求是否成功
+4. [ ] 確認 API 回傳數據格式正確
+
+## 📊 效能檢查
+
+### 資料庫效能
+- [ ] 查詢速度 < 100ms
+  ```bash
+  psql -h localhost -U crypto_user -d crypto_metrics \
+    -c "EXPLAIN ANALYZE SELECT * FROM funding_rate_stats WHERE period = '7d';"
+  ```
+- [ ] 索引正確建立
+  ```bash
+  psql -h localhost -U crypto_user -d crypto_metrics -c "\di"
+  ```
+
+### 收集器效能
+- [ ] CPU 使用率 < 50%
+  ```bash
+  top -p $(pgrep -f main_collector.py)
+  ```
+- [ ] 記憶體使用率 < 500MB
+- [ ] 無錯誤訊息在 system.log
+
+### API 效能
+- [ ] 回應時間 < 200ms
+  ```bash
+  time curl http://localhost:8000/api/health
+  ```
+- [ ] 併發請求處理正常
+
+## ✅ 最終確認
+
+完成以上所有檢查後:
+
+- [ ] 系統穩定運行 > 1 小時
+- [ ] 無錯誤日誌
+- [ ] 數據持續收集
+- [ ] 前端正常顯示
+- [ ] API 正常回應
+- [ ] Grafana 正常運作（如有安裝）
+
+## 🎉 部署完成！
+
+恭喜！你已成功部署加密貨幣監控系統。
+
+### 下一步:
+1. 📖 閱讀 [README.md](README.md) 了解更多功能
+2. 🏗️ 閱讀 [ARCHITECTURE.md](ARCHITECTURE.md) 了解系統架構
+3. 🔧 根據需求自訂配置
+4. 📊 設定 Grafana 儀表板
+5. 🔐 加強安全設定
+
+---
+
+**檢查清單版本**: 1.0.0
+**最後更新**: 2024-12-12
