@@ -1,0 +1,207 @@
+# ⚡ 快速開始指南
+
+5 分鐘快速部署加密貨幣監控系統
+
+## 📋 前置檢查
+
+確認已安裝以下軟體:
+```bash
+✅ Python 3.8+
+✅ PostgreSQL 12+
+✅ pip (Python 套件管理器)
+```
+
+## 🚀 方法一: 自動安裝腳本（推薦）
+
+### Step 1: 賦予執行權限
+```bash
+chmod +x start.sh
+```
+
+### Step 2: 執行啟動腳本
+```bash
+./start.sh
+```
+
+### Step 3: 依序選擇選項
+```
+1. 安裝依賴套件
+2. 初始化資料庫
+3. 啟動所有服務
+```
+
+### Step 4: 完成！
+- 前端網站: http://localhost:8000/static/index.html
+- API 文檔: http://localhost:8000/docs
+- Grafana: http://localhost:3000 (需另外安裝)
+
+## 🔧 方法二: 手動安裝
+
+### 1. 安裝 Python 套件
+```bash
+pip install -r requirements.txt --break-system-packages
+```
+
+### 2. 設定資料庫密碼
+編輯以下檔案，修改 `DB_CONFIG` 中的 `password`:
+- `collectors/main_collector.py`
+- `database/db_init.py`
+- `scripts/analyze_logs.py`
+- `frontend/api_server.py`
+
+### 3. 初始化資料庫
+```bash
+# 建立 PostgreSQL 資料庫
+sudo -u postgres psql
+CREATE DATABASE crypto_metrics;
+CREATE USER crypto_user WITH PASSWORD 'your_password';
+GRANT ALL PRIVILEGES ON DATABASE crypto_metrics TO crypto_user;
+\q
+
+# 初始化表結構
+python database/db_init.py init
+```
+
+### 4. 啟動服務
+```bash
+# 終端機 1: 數據收集器
+python collectors/main_collector.py
+
+# 終端機 2: API 伺服器
+python frontend/api_server.py
+
+# 終端機 3: Log 分析（定期執行）
+python scripts/analyze_logs.py
+```
+
+## 🐳 方法三: Docker 部署
+
+### 快速啟動
+```bash
+docker-compose up -d
+```
+
+### 查看日誌
+```bash
+docker-compose logs -f collector
+docker-compose logs -f api
+```
+
+### 停止服務
+```bash
+docker-compose down
+```
+
+## 📊 驗證安裝
+
+### 1. 檢查資料庫連線
+```bash
+python -c "import psycopg2; conn = psycopg2.connect(host='localhost', database='crypto_metrics', user='crypto_user', password='your_password'); print('✅ 資料庫連線成功')"
+```
+
+### 2. 檢查 API 健康狀態
+```bash
+curl http://localhost:8000/api/health
+```
+
+應該看到:
+```json
+{
+  "status": "healthy",
+  "database": "connected",
+  "timestamp": "2024-12-12T..."
+}
+```
+
+### 3. 查看收集的數據
+```bash
+# 查看 Log 檔案
+tail -f logs/fr_ob_metrics.log
+tail -f logs/options_metrics.log
+
+# 或使用啟動腳本
+./start.sh
+# 選擇 "7. 查看日誌"
+```
+
+## 🎯 下一步
+
+### 設定 Grafana（可選）
+1. 安裝 Grafana:
+   ```bash
+   # Ubuntu/Debian
+   sudo apt-get install -y adduser libfontconfig1
+   wget https://dl.grafana.com/oss/release/grafana_10.0.0_amd64.deb
+   sudo dpkg -i grafana_10.0.0_amd64.deb
+   sudo systemctl start grafana-server
+   
+   # macOS
+   brew install grafana
+   brew services start grafana
+   ```
+
+2. 開啟 Grafana: http://localhost:3000
+   - 預設帳密: `admin` / `admin`
+
+3. 新增 PostgreSQL Data Source:
+   - Type: PostgreSQL
+   - Host: `localhost:5432`
+   - Database: `crypto_metrics`
+   - User: `crypto_user`
+   - Password: `your_password`
+
+4. 匯入 Dashboard:
+   - 點選 "+" → "Import"
+   - 上傳 `grafana/dashboard.json`
+
+### 設定定時任務
+```bash
+# 編輯 crontab
+crontab -e
+
+# 新增以下內容
+# 每天凌晨 1 點執行 Log 分析
+0 1 * * * cd /path/to/crypto_monitor && python scripts/analyze_logs.py
+
+# 每天凌晨 2 點建立未來 7 天的分片表
+0 2 * * * cd /path/to/crypto_monitor && python database/db_init.py prepare 7
+
+# 每週日凌晨 3 點清理 30 天前的舊表
+0 3 * * 0 cd /path/to/crypto_monitor && python database/db_init.py cleanup 30
+```
+
+## 🔍 常見問題
+
+### Q1: 資料庫連線失敗
+**A**: 檢查 PostgreSQL 是否運行
+```bash
+sudo systemctl status postgresql
+```
+
+### Q2: Options 收集失敗
+**A**: 檢查 Deribit API 是否可用
+```bash
+python -c "import ccxt; ex = ccxt.deribit(); print(ex.fetch_markets())"
+```
+
+### Q3: 前端顯示"載入中..."
+**A**: 確認 API 伺服器已啟動並執行過 Log 分析
+```bash
+# 檢查 API
+curl http://localhost:8000/api/health
+
+# 執行分析
+python scripts/analyze_logs.py
+```
+
+### Q4: Grafana 無法連線資料庫
+**A**: 確認資料庫密碼設定正確，並測試連線
+
+## 📞 需要幫助？
+
+查看完整文檔: [README.md](README.md)
+
+---
+
+**版本**: 1.0.0
+**更新**: 2024-12-12
